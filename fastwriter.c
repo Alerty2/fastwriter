@@ -315,7 +315,44 @@ uint16_t get_keycode_from_wchar(wchar_t c, bool *needs_shift, bool *needs_alt) {
 }
 
 void write_word(char word[], int substituted_word_length) {
-    writing = substituted_word_length * 2;
+
+    // Transform UTF-8 to wchar
+    wchar_t w_word[SUBSTITUTE_WORD_CHAR];
+    mbstowcs(w_word, word, SUBSTITUTE_WORD_CHAR);
+
+    // 1. CALCULAR EXACTAMENTE CUÁNTOS EVENTOS "PRESSED" VAMOS A GENERAR
+    int presses = substituted_word_length; // Los backspaces
+    for (int i = 0; w_word[i] != L'\0'; i++) {
+        bool needs_shift = false;
+        bool needs_alt = false;
+        uint16_t keycode = get_keycode_from_wchar(w_word[i], &needs_shift, &needs_alt);
+
+        if (keycode != 0) {
+            if (needs_shift) presses++;
+            if (needs_alt) presses++;
+            presses++;
+        } else {
+            // Special keys depending on the OS
+            switch(OS){
+                case 0: { // Linux
+                    char hex_str[10];
+                    sprintf(hex_str, "%x", w_word[i]);
+                    // Ctrl+Shift (2) + U (1) + hex length + Space (1)
+                    presses += 4 + strlen(hex_str); 
+                    break;
+                }
+                case 1: { // Windows
+                    presses += 5; // Alt (1) + 4 digits (4)
+                    break;
+                }
+                case 2: // MAC
+                    break;
+            }
+        }
+    }
+    
+    // Ignote exactly this number of events
+    writing = presses;
 
     uiohook_event press_event = {0};
     press_event.type = EVENT_KEY_PRESSED;
@@ -332,19 +369,15 @@ void write_word(char word[], int substituted_word_length) {
         usleep(5000);
     }
 
-    // Transform UTF-8 to wchar
-    wchar_t w_word[SUBSTITUTE_WORD_CHAR];
-    mbstowcs(w_word, word, SUBSTITUTE_WORD_CHAR);
-
     for (int i = 0; w_word[i] != L'\0'; i++) {
         bool needs_shift = false;
         bool needs_alt = false;
         
-        // Get keycode
         uint16_t keycode = get_keycode_from_wchar(w_word[i], &needs_shift, &needs_alt);
 
         if (keycode != 0) {
-            // Standar ASCII char
+
+            // Presses shift if needed
             if (needs_shift) {
                 uiohook_event shift_event = {0};
                 shift_event.type = EVENT_KEY_PRESSED;
@@ -352,6 +385,7 @@ void write_word(char word[], int substituted_word_length) {
                 hook_post_event(&shift_event);
                 usleep(5000);
             }
+            // Presses alt if needed
             if (needs_alt) {
                 uiohook_event alt_event = {0};
                 alt_event.type = EVENT_KEY_PRESSED;
@@ -362,6 +396,7 @@ void write_word(char word[], int substituted_word_length) {
 
             type_key(keycode);
 
+            // Releases shift if needed
             if (needs_shift) {
                 uiohook_event shift_event = {0};
                 shift_event.type = EVENT_KEY_RELEASED;
@@ -369,6 +404,7 @@ void write_word(char word[], int substituted_word_length) {
                 hook_post_event(&shift_event);
                 usleep(5000);
             }
+            // Releases alt if needed
             if (needs_alt) {
                 uiohook_event alt_event = {0};
                 alt_event.type = EVENT_KEY_RELEASED;
@@ -377,57 +413,57 @@ void write_word(char word[], int substituted_word_length) {
                 usleep(5000);
             }
         } else {
-            // Special character (insertion depends on OS)
-            switch(OS){
+            switch(OS){ // Type special chars depending on the OS
                 case 0: type_unicode_linux(w_word[i]); break;
                 case 1: type_unicode_windows(w_word[i]); break;
-                case 3: type_unicode_mac(w_word[i]); break;
+                case 2: type_unicode_mac(w_word[i]); break; 
             }
-            
         }
     }
 }
 
 void dispatch_event(uiohook_event * const event) {
-    // Only key-pressing events
+
     if (event->type != EVENT_KEY_PRESSED) {
         return; 
     }
 
-    writing--;
-    if (writing <= 0){ // For preventing unwanted loops
-        char ch = get_char_from_event(event);
-        if (ch != 0) {
-            currently_typing[ptr] = ch;
-            ptr++;
-            currently_typing[ptr] = '\0';
-        }
+    // Ignore simulating events
+    if (writing > 0){ 
+        writing--;
+        return; 
     }
 
-    // Controls buffer size
-    if (ptr > SUBSTITUTE_WORD_CHAR) {
-        for (int i = 0; i < SUBSTITUTE_WORD_CHAR; i++) {
+    char ch = get_char_from_event(event);
+    if (ch != 0) {
+        currently_typing[ptr] = ch;
+        ptr++;
+        currently_typing[ptr] = '\0';
+    }
+
+    // Memory safety
+    if (ptr >= SUBSTITUTE_WORD_CHAR - 1) {
+        for (int i = 0; i < SUBSTITUTE_WORD_CHAR - 1; i++) {
             currently_typing[i] = currently_typing[i + 1];
         }
-        ptr = SUBSTITUTE_WORD_CHAR;
+        ptr--;
         currently_typing[ptr] = '\0'; 
     }
 
-    // Checks if one word is contained in the typed text
+    // Detects if what you write is one of the selected words
     for (int i = 0; i < ptr; i++) {
         char *sufix = &currently_typing[i]; 
-        char *sunstitution = look_for_word(sufix);
+        char *substitution = look_for_word(sufix);
 
-        if (strcmp(sunstitution, "None") != 0) {
-            // Count the length of wchar string
+        if (strcmp(substitution, "None") != 0) {
             wchar_t w_sufix[SUBSTITUTE_WORD_CHAR];
             mbstowcs(w_sufix, sufix, SUBSTITUTE_WORD_CHAR);
             
-            write_word(sunstitution, wcslen(w_sufix));
-            
-            // Clean buffer
+            // Clean buffer before writing for evading problems on windows
             ptr = 0;
             currently_typing[0] = '\0';
+            
+            write_word(substitution, wcslen(w_sufix));
             break;
         }
     }
